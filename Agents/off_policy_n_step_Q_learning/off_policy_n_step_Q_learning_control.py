@@ -4,20 +4,21 @@
 from math import prod
 import random
 import sys
+import time
 
 from numba import jit
 
-from Agents.utils import export_tabular_policy, pick_action, set_policy_e_greedy, set_policy_greedy, e_greedy
+from Agents.utils import export_tabular_policy, pick_action, set_policy_e_greedy, set_policy_greedy, e_greedy_w_policy
 
 class OffPolicyNStepQLearningControl:
     
-    def __init__(self, alpha: float, n: int, gamma:float, bias:int, get_starting_state, get_state_space, get_action_space, is_state_terminal, sars):
+    def __init__(self, alpha: float, n: int, gamma:float, bias:int, timelimit:int, get_starting_state, get_state_space, get_action_space, model_step):
 
         #step_size        
         self.alpha = alpha
     
-        #takes in state, action, returns reward, state
-        self.sars = sars
+        #takes in [state, action], returns [state, reward, done, info]
+        self.model_step = model_step
     
         #target policy MUST be greedy to allow for any exploration....
         self.e_for_target_policy = 0.05
@@ -37,6 +38,9 @@ class OffPolicyNStepQLearningControl:
         #discout factor
         self.gamma = gamma
         
+        #max time for learning
+        self.timelimit =timelimit
+        
         #returns starting_state
         self.get_starting_state = get_starting_state
         
@@ -47,9 +51,7 @@ class OffPolicyNStepQLearningControl:
         self.pi_s = {}
         
         
-        #for argument state returns boolean "is terminal"
-        self.is_state_terminal = is_state_terminal
-        
+
         for s in get_state_space():
             action_space = get_action_space(s)
 
@@ -63,7 +65,7 @@ class OffPolicyNStepQLearningControl:
         self.t = 0
         self.t_terminal = sys.maxsize
         
-        pass
+        self.learn_policy()
     
      
     #returns part of dicitonary that is bigger or equal to i and smaller than to
@@ -118,11 +120,11 @@ class OffPolicyNStepQLearningControl:
             a_t = behaviour_policy(s)
             self.A_t[t] = a_t
 
-            [r_n, s_n] = self.sars(s, a_t)
+            [s_n, r_n, done, _] = self.model_step(s, a_t)
             self.R_t[t+1] = r_n
             self.S_t[t+1] = s_n
         
-            if self.is_state_terminal(s_n):
+            if done:
                 self.t_terminal = t+1
             else:
                 self.A_t[t+1] = behaviour_policy(s_n)
@@ -149,29 +151,20 @@ class OffPolicyNStepQLearningControl:
             set_policy_e_greedy(self.pi_s, self.Q_s_a, self.S_t[t_u], e_for_target_policy)
         return s_n
     
-    def learn_policy(self, max_episodes):
+    def learn_policy(self):
         
-        for i in range(max_episodes):
+        start_time = time.time()
+        
+        while time.time() - start_time < self.timelimit:
+            
             s = self.get_starting_state()
             self.episode_init(s)
     
             while self.t_updated() != self.t_terminal -1:
                 e = 0.9 #1 - (i/max_episodes) * 1/2
-                behaviour_policy = lambda s : e_greedy(e, self.pi_s, s) #e greedy behaviour policy
+                behaviour_policy = lambda s : e_greedy_w_policy(e, self.pi_s, s) #e greedy behaviour policy
                 s = self.iteration(s, behaviour_policy, self.e_for_target_policy) #target policy is also "e greedy"
                 self.t += 1
-                
-                #in case of stuck, please dont happen
-                if(self.t >=50000):
-                    print("t is very big, stuck!")
-                    break
-                
-            if max_episodes // 10 and i % (max_episodes // 10) == 0 and i != 0:
-                print(f'Learning policy {i / max_episodes:.0%} complete.')
         
-        #print("Exporting tabular policy") 
-        #export_tabular_policy(self.pi_s, "Off_Policy_N_Step_Q_Learning_Control")
-        #print("Exporting Q_S_A") 
-        #export_tabular_policy(self.Q_s_a, "q_s_a_q_learning")
-        callable_policy = lambda s: e_greedy(0, self.pi_s, s) # completly greedy callable polciy 
-        return callable_policy
+    def get_policy(self, state):
+        return e_greedy_w_policy(0, self.pi_s, state)

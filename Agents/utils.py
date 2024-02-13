@@ -26,8 +26,8 @@ def set_policy_greedy(p_s_a, Q_s_a, s):
     for [action, _] in p_s_a[s].items():
         p_s_a[s][action] = 0
     p_s_a[s][optimal_action] = 1
-    
-def e_greedy(e, policy, state):
+  
+def e_greedy_w_policy(e, policy, state):
         
     if random.random() < e:
         i = list(policy[state].keys())
@@ -52,3 +52,12 @@ def pick_action(policy, state):
         print("error wariacie")
             
     return def_action
+
+def e_greedy(e, action_values):
+        
+    if random.random() < e:
+        [action, value] = random.choice(action_values)
+        return action
+    else:
+         [action, value] = max(action_values, key=lambda x: x[1])
+         return action

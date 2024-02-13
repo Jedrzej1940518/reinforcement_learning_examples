@@ -1,9 +1,16 @@
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Manager
+
 import copy
 from dataclasses import dataclass
+import os
 import random
+import string
 import time
+from typing import Any
 import numpy as np
 from Agents.debug_utils import export_agent_results
+from Agents.monte_carlo_tree_search.MonteCarloTreeSearch import MonteCarloTreeSearch
 
 from Agents.off_policy_monte_carlo.off_policy_monte_carlo_control import OffPolicyMcControl
 from Agents.off_policy_n_step_Q_learning.off_policy_n_step_Q_learning_control import OffPolicyNStepQLearningControl
@@ -16,7 +23,7 @@ grid = [] # np.array(exported_grid.color_grid)
 nrows, ncols = 0,0 #exported_grid.nrows, exported_grid.ncols
 colors =  {} #{name:index for index, name in enumerate(exported_grid.colors)}
 
-starting_positions = [] #get_starting_positions()
+starting_positions = [] #initialize_starting_positions()
 state_space = {} #init_state_space()
 action_space = {} #init_action_space()
 
@@ -44,7 +51,7 @@ def get_starting_state(win = False) -> State:
     
     return State(x,y, 0,0,0, win)
 
-def get_starting_positions() -> [int, int]:
+def initialize_starting_positions() -> list[int, int]:
     starting_positions = []
     for y, rows in enumerate(grid):
         for x, columns in enumerate(rows):
@@ -56,13 +63,13 @@ def get_starting_positions() -> [int, int]:
 def get_starting_position():
     return random.choice(starting_positions)
  
-def next_state(state: State, action:Action) -> State:
+def next_state(state: State, action:Action, randomized: bool = True) -> State:
 
     v_l = state.v_l
     v_r = state.v_r
     v_f = state.v_f
         
-    if random.random() > 0.1:
+    if not randomized or random.random() > 0.1:
         v_l += action.v_l_d
         v_r += action.v_r_d
         v_f += action.v_f_d
@@ -86,7 +93,7 @@ def next_state(state: State, action:Action) -> State:
             x -=1
             r+=1
         
-        if x > ncols or x < 0 or y > nrows or y < 0:
+        if x >= ncols or x < 0 or y >= nrows or y < 0:
             death = True
             break
         
@@ -100,18 +107,16 @@ def next_state(state: State, action:Action) -> State:
             
     
     if death:
-        return get_starting_state(win)
+        return get_starting_state()
 
     return State(x,y,v_l, v_r, v_f, win)
 
 
 def init_state_space():
-    
-    print("geting state space")
-    
+     
     possible_states = []
     possible_tiles = []
-    
+
     for y in range(nrows):
         for x in range(ncols):
             if grid[y,x] == colors['black']:
@@ -125,13 +130,15 @@ def init_state_space():
                     win = grid[y,x] == colors['green']
                     possible_states.append(State(x,y,v_l, v_r, v_f, win))
     
-    print("finished getting state space")
     return possible_states
 
 
 def action_legal(delta, state):
     return state+delta <= 5 and state + delta >=0
 
+def action_leads_to_zero_speed(state: State, action: Action):
+    state_after_action = State(state.x, state.y, state.v_l + action.v_l_d, state.v_r + action.v_r_d, state.v_f + action.v_f_d, state.win)
+    return (state_after_action.v_l == state_after_action.v_r and state_after_action.v_f == 0) or state_after_action.v_f < 0
 
 def get_state_space():
     return state_space
@@ -151,8 +158,11 @@ def init_action_space():
                         continue
                     if not action_legal(r_d, state.v_r):
                         continue
-                    if l_d == 0 and r_d == 0 and f_d == 0 and is_starting_position(state):
+                    if action_leads_to_zero_speed(state, Action(l_d, r_d, f_d)):
                         continue
+                    if f_d <= 0 and is_starting_position(state):
+                        continue
+
                     state_actions.append(Action(l_d, r_d, f_d))
         
         actions[state] = state_actions
@@ -163,8 +173,10 @@ def init_action_space():
 def get_action_space(state:State):
     return action_space[state]
 
-def generate_episode(policy, for_real = False):
+def generate_episode(policy, randomized = False, for_real = False, step_by_step_visualise = False):
 
+    episode_too_long = 30
+    
     r_s_a = []
     
     s = get_starting_state()
@@ -175,24 +187,19 @@ def generate_episode(policy, for_real = False):
             break
         r = -1
         r_s_a.append([r, s, a])
-    
-        s = next_state(s, a)
         
-        if for_real and len(r_s_a) > 30:
+        if step_by_step_visualise:
+            show_episode(r_s_a)
+
+        s = next_state(s, a, randomized)
+        
+        if for_real and len(r_s_a) > episode_too_long:
             break
     
     r_s_a.append([1, s, a]) #we won
-    win = len(r_s_a) <= 30
+    win = len(r_s_a) <= episode_too_long
     return [win, r_s_a]
 
-def is_state_terminal(state: State):
-    return state.win
-
-
-def sars(state: State, action: Action):
-    s = next_state(state, action)
-    r = 1 if s.win else -1
-    return [r,s]
 
 def show_episode(r_s_a):
     grid_cp = np.array(exported_grid.color_grid)
@@ -201,48 +208,40 @@ def show_episode(r_s_a):
         grid_cp[y,x] = colors['blue']
     show_grid(grid_cp)
     
+    
+def hash_state(state: State) -> str:
+    # Normalize ranges
+    v_l_normalized = state.v_l + 5
+    v_r_normalized = state.v_r + 5
+    v_f_normalized = state.v_f + 5
 
-def monte_carlo_main(gamma, episode_number, policy_runs, visualise: bool = False):
-    start_time = time.time()
+    # Encode win as 0 or 1
+    win_encoded = int(state.win)
+    
+    # Concatenate with delimiter
+    hash_parts = [
+        str(state.x).zfill(2),  # Ensure 2 digits
+        str(state.y).zfill(2),  # Ensure 2 digits
+        str(v_l_normalized).zfill(2),
+        str(v_r_normalized).zfill(2),
+        str(v_f_normalized).zfill(2),
+        str(win_encoded)
+    ]
+    hash_str = '-'.join(hash_parts)
+    
+    # Optional: Convert to a higher base if desired
+    # This step is skipped in this example for simplicity
+    
+    return hash_str
+    
 
-    ofpmc = OffPolicyMcControl(gamma, episode_number, get_action_space, get_state_space, generate_episode)
-    policy = ofpmc.off_policy_mc()
-    callable_policy = lambda s : policy[s]
-    print(f'MonteCarlo: Finished generating policy. Trying optimal policy {policy_runs} times')
-    results = []
-    for i in range(policy_runs):
-        [win, r_s_a] = generate_episode(callable_policy, True)
-        results.append([win, len(r_s_a)])
-        if visualise:
-            show_episode(r_s_a)
+def model_step(state: State, action: Action) -> tuple[State, int, bool, Any]:
+    s = next_state(state,action, False)
+    r = 1 if s.win else -1
+    return [s, r, s.win, None]
 
-    keys = ["gamma","episode_number", "policy_runs"]
-    agent_params = {key: locals()[key] for key in keys}
-    t = time.time() - start_time
-    export_agent_results("MonteCarlo", t, agent_params, results)
-    
-        
 
-def n_step_q_learning_main(alpha, n, gamma, bias, episode_number, policy_runs, visualise: bool = False):
-    start_time = time.time()
-    
-    opnsqlc = OffPolicyNStepQLearningControl(alpha, n, gamma, bias, get_starting_state, get_state_space, get_action_space, is_state_terminal, sars)
-    callable_policy =opnsqlc.learn_policy(episode_number)
-    
-    print(f'Finished generating policy. Trying optimal policy {policy_runs} times')
-    results = []
-    for i in range(policy_runs):
-        [win, r_s_a] = generate_episode(callable_policy, True)
-        results.append([win, len(r_s_a)])
-        if visualise and i < 10:
-            show_episode(r_s_a)
-    
-    keys = ["alpha", "n", "gamma", "bias", "episode_number", "policy_runs"]
-    agent_params = {key: locals()[key] for key in keys}
-    t = time.time() - start_time
-    export_agent_results("Q_Learning", t, agent_params, results)
-    
-def main():
+def initialization():
     global grid, nrows, ncols, colors, state_space, action_space, starting_positions
     
     grid = np.array(exported_grid.color_grid)
@@ -251,13 +250,116 @@ def main():
 
     state_space = init_state_space()
     action_space = init_action_space()
-    starting_positions = get_starting_positions()
+    starting_positions = initialize_starting_positions()
 
-    #monte_carlo_main(0.9, 9000, 100)
+def run_agent(agent, policy_runs, visualise_func, hiperparams, env_functions):
 
-    n_step_q_learning_main(0.9, 10, 0.95, -20, 50, 100, True)
-    #n_step_q_learning_main(0.9, 10, 1, -20, 50, 100)
-    #n_step_q_learning_main(0.9, 10, 0.95, -50, 50, 100)
+    ag = agent(**hiperparams, **env_functions)
+    callable_policy = lambda s: ag.get_policy(s)
+    results = []
+    for i in range(policy_runs):
+        [win, r_s_a] = generate_episode(callable_policy, randomized=False, for_real = True)
+        results.append([win, len(r_s_a)])
+        if visualise_func:
+            visualise_func(r_s_a)
+
+    return results
+    
+def time_agent(agent, initialize_env, policy_runs, visualise_func, hiperparams, env_functions):
+    
+    if initialize_env:
+        initialize_env()
+        
+    print("Agent:",agent.__name__," Pid:", os.getpid(), ", args: ", hiperparams)
+    start_time = time.time()
+    results = run_agent(agent, policy_runs, visualise_func, hiperparams, env_functions)
+    t = time.time() - start_time
+    return [t, results]
+   
+def multithreaded_run(threads, export_results, func, **kwargs):
+    results = []
+    times = []
+    with ProcessPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(func, **kwargs) for _ in range(threads)]
+        for future in futures:
+            [t, result] = future.result()
+            results.append(*result)
+            times.append(t)
+
+    if export_results:
+        export_agent_results(kwargs["agent"].__name__, max(times), results, kwargs["hiperparams"], threads)
+
+def mcts_main():
+    hiperparams = {"gamma": 0.95, "bias": -20, "exploration_degree": 0.2, 
+                "tree_policy_depth": 2, "timelimit": 15}
+    env_functions = {"hash_state": hash_state, "get_action_space": get_action_space, "model_step": model_step}
+
+    kwargs = {  "agent":MonteCarloTreeSearch,
+                "initialize_env":initialization, 
+                "policy_runs":1,
+                "visualise_func":None, 
+                "hiperparams":hiperparams, 
+                "env_functions":env_functions}
+
+    multithreaded_run(10, True, time_agent, **kwargs)
+    
+    hiperparams["bias"] = -25
+    
+    multithreaded_run(10, True, time_agent, **kwargs)
+    
+    hiperparams["bias"] = -20
+    hiperparams["tree_policy_depth"] = 5
+    
+    multithreaded_run(10, True, time_agent, **kwargs)
+    
+    hiperparams["tree_policy_depth"] = 2
+    hiperparams["exploration_degree"] = 0.1
+    
+    multithreaded_run(10, True, time_agent, **kwargs)
+    hiperparams["tree_policy_depth"] = 2
+    hiperparams["exploration_degree"] = 0.3
+    multithreaded_run(10, True, time_agent, **kwargs)
+    hiperparams["tree_policy_depth"] = 5
+    multithreaded_run(10, True, time_agent, **kwargs)
+    
+def mc_main():
+    
+    hiperparams = {"gamma": 0.95, "bias":-100000, "timelimit": 10}
+    env_functions = {"get_state_space": get_state_space, "get_starting_state":get_starting_state, "get_action_space": get_action_space, "model_step": model_step}
+
+    kwargs = {  "agent":OffPolicyMcControl,
+                "initialize_env":initialization, 
+                "policy_runs":1,
+                "visualise_func":show_episode, 
+                "hiperparams":hiperparams, 
+                "env_functions":env_functions}
+
+    multithreaded_run(10, True, time_agent, **kwargs)
+    
+    hiperparams["timelimit"] = 30
+    
+    multithreaded_run(10, True, time_agent, **kwargs)
+
+
+def q_learning_main():
+   
+    hiperparams = { "alpha":0.9, "n": 10, "gamma":0.95, "timelimit": 600, "bias": -20}
+    env_functions = {"get_state_space": get_state_space, "get_starting_state":get_starting_state, "get_action_space": get_action_space, "model_step": model_step}
+
+    kwargs = {  "agent":OffPolicyNStepQLearningControl,
+                "initialize_env":initialization, 
+                "policy_runs":1,
+                "visualise_func":show_episode, 
+                "hiperparams":hiperparams, 
+                "env_functions":env_functions}
+
+    multithreaded_run(5, True, time_agent, **kwargs)
+        
+
+def main():
+     mcts_main()
+     #mc_main()
+     #q_learning_main()
 
 if __name__ == "__main__":
     main()
